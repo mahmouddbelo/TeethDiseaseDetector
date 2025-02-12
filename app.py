@@ -1,72 +1,104 @@
 import streamlit as st
-import torch.nn as nn
-
 import torch
 import torchvision.transforms as transforms
+from torchvision import models
 from PIL import Image
+from torch import nn
+from custom_cnn import CNN  # Import your custom CNN model
 
-# Load the model
-class CNN(nn.Module):
-    def __init__(self, num_classes):
-        super(CNN, self).__init__()
-        self.conv1 = nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)
-        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1)
-        self.fc1 = nn.Linear(128 * 28 * 28, 512)
-        self.fc2 = nn.Linear(512, num_classes)
-        self.relu = nn.ReLU()
-        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.dropout = nn.Dropout(0.4)
 
-    def forward(self, x):
-        x = self.pool(self.relu(self.conv1(x)))
-        x = self.pool(self.relu(self.conv2(x)))
-        x = self.pool(self.relu(self.conv3(x)))
-        x = x.view(x.size(0), -1)
-        x = self.relu(self.fc1(x))
-        x = self.dropout(x)
-        x = self.fc2(x)
-        return x
-    
-num_classes = 7
-model = CNN(num_classes)
-# Load the trained model weights
-model_path = r"D:\Career\Cellula\Task 1\teeth_classification_model.pth"  # Ensure the path is correct
-model.load_state_dict(torch.load(model_path, map_location=torch.device("cpu")))
-model.eval()
+# Define class labels
+CLASS_LABELS = ['CaS', 'CoS', 'Gum', 'MC', 'OC', 'OLP', 'OT']
 
+# Paths to model weights
+CNN_MODEL_PATH = r"D:\Career\Cellula\Task 1\teeth_classification_model.pth"
+RESNET_MODEL_PATH = r"D:\Career\Cellula\Task 1\best_model.pth"
+
+def load_cnn_model(num_classes):
+    try:
+        model = CNN(num_classes)
+        model.load_state_dict(torch.load(CNN_MODEL_PATH, map_location=torch.device("cpu")))
+        model.eval()
+        return model
+    except Exception as e:
+        st.error(f"Error loading CNN model: {e}")
+        return None
+def load_resnet_model(num_classes):
+    try:
+        # Initialize ResNet50 model
+        model = models.resnet50(pretrained=False)
+        
+        # Modify the first conv layer to match the checkpoint
+        model.layer1[0].conv1 = nn.Conv2d(64, 64, kernel_size=(1, 1), stride=(1, 1), bias=False)
+        model.layer1[1].conv1 = nn.Conv2d(256, 64, kernel_size=(1, 1), stride=(1, 1), bias=False)
+        
+        # Modify the final fully connected layer
+        model.fc = nn.Linear(2048, num_classes)
+        
+        # Load the state dict
+        state_dict = torch.load(RESNET_MODEL_PATH, map_location=torch.device('cpu'))
+        model.load_state_dict(state_dict, strict=False)
+        
+        model.eval()
+        return model
+    except Exception as e:
+        st.error(f"Error loading ResNet model: {e}")
+        return None
+
+# Define the image transformation pipeline
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
-    transforms.RandomRotation(30),
-    transforms.RandomHorizontalFlip(),
-    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.2),
     transforms.ToTensor(),
-    transforms.Normalize([0.5], [0.5])
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # ImageNet normalization
 ])
 
-# Streamlit app
-st.title("Teeth Disease Classification")
-st.write("Upload an image to classify.")
+def main():
+    # Streamlit app title and description
+    st.title("Teeth Disease Classification")
+    st.write("Upload an image of teeth to classify the disease")
 
-# Upload image using Streamlit
-uploaded_file = st.file_uploader("Choose a teeth image...", type=["jpg", "jpeg", "png"])
+    # Dropdown menu to select the model
+    model_choice = st.selectbox("Choose the model:", ("Custom CNN", "Pretrained ResNet"))
 
-if uploaded_file is not None:
-    # Load and display the image
-    image = Image.open(uploaded_file).convert("RGB")
-    st.image(image, caption="Uploaded Image", use_column_width=True)
+    # Load the appropriate model based on the selection
+    model = None
+    if model_choice == "Custom CNN":
+        model = load_cnn_model(len(CLASS_LABELS))
+    else:
+        model = load_resnet_model(len(CLASS_LABELS))
 
-    # Preprocess the image
-    image_tensor = transform(image).unsqueeze(0)  # Add batch dimension
+    # File uploader for the image
+    uploaded_file = st.file_uploader("Upload a teeth image...", type=["jpg", "jpeg", "png"])
 
-    # Make prediction
-    with torch.no_grad():
-        output = model(image_tensor)
-        _, predicted = torch.max(output, 1)  # Get the class with the highest score
+    if uploaded_file is not None:
+        try:
+            # Load and display the uploaded image
+            image = Image.open(uploaded_file).convert("RGB")
+            st.image(image, caption="Uploaded Image", use_column_width=True)
 
-    # Define class labels
-    class_labels = ['CaS', 'CoS', 'Gum', 'MC', 'OC', 'OLP', 'OT']
-    predicted_class = class_labels[predicted.item()]
+            # Preprocess the image
+            image_tensor = transform(image).unsqueeze(0)
 
-    # Display the result
-    st.write(f"**Predicted Class:** {predicted_class}")
+            # Make prediction if model is loaded
+            if model is not None:
+                with torch.no_grad():
+                    outputs = model(image_tensor)
+                    probabilities = torch.nn.functional.softmax(outputs, dim=1)
+                    _, predicted = torch.max(outputs, 1)
+
+                # Display prediction and confidence
+                predicted_class = CLASS_LABELS[predicted.item()]
+                confidence = probabilities[0][predicted.item()].item() * 100
+                
+                # Create a result container
+                result_container = st.container()
+                with result_container:
+                    st.success(f"Predicted Class: {predicted_class}")
+                    st.info(f"Confidence: {confidence:.2f}%")
+                    
+        except Exception as e:
+            st.error(f"Error processing the image: {e}")
+            st.write("Please try uploading a different image or check if the image format is supported.")
+
+if __name__ == "__main__":
+    main()
